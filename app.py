@@ -22,8 +22,9 @@ from handwriter import (  # noqa: E402
     build_word_bank,
     evaluate_dataset_reconstruction,
 )
-from handwriter.preview import side_by_side  # noqa: E402
+from handwriter.preview import stack_horizontal  # noqa: E402
 from handwriter.quality import build_quality_report  # noqa: E402
+from handwriter.word_inspector import build_word_contact_sheet, export_word_samples  # noqa: E402
 
 
 @st.cache_resource
@@ -33,21 +34,31 @@ def bootstrap_pipeline():
     paths = DatasetPaths(root=PROJECT_ROOT)
     dataset = HandwritingDataset(paths=paths)
     style_profile = build_style_profile(dataset=dataset, include_copies=False)
-    word_bank = build_word_bank(dataset=dataset, include_copies=False)
-    renderer = HandwritingRenderer(
+    word_bank = build_word_bank(
+        dataset=dataset,
+        include_copies=False,
+        include_fallback_samples=False,
+    )
+    word_bank_renderer = HandwritingRenderer(
         dataset=dataset,
         style_profile=style_profile,
         word_bank=word_bank,
         config=RenderConfig(),
     )
+    glyph_renderer = HandwritingRenderer(
+        dataset=dataset,
+        style_profile=style_profile,
+        word_bank=None,
+        config=RenderConfig(prefer_word_bank=False),
+    )
     quality_report = build_quality_report(dataset)
-    return dataset, style_profile, word_bank, renderer, quality_report
+    return dataset, style_profile, word_bank, word_bank_renderer, glyph_renderer, quality_report
 
 
 def main() -> None:
     st.set_page_config(page_title="Handwriter Prototype", layout="wide")
 
-    dataset, style_profile, word_bank, renderer, quality_report = bootstrap_pipeline()
+    dataset, style_profile, word_bank, word_bank_renderer, glyph_renderer, quality_report = bootstrap_pipeline()
 
     st.title("Handwriter Prototype")
     st.caption(
@@ -63,21 +74,39 @@ def main() -> None:
             height=120,
         )
         seed = st.number_input("Render seed", min_value=0, max_value=9999, value=7, step=1)
+        render_mode = st.radio(
+            "Render mode",
+            options=("Word-bank assisted", "Glyph only", "Compare both"),
+            horizontal=True,
+        )
 
-        rendered = renderer.render_text(input_text, seed=int(seed))
-        st.image(rendered.image, caption="Synthesized handwriting", use_container_width=True)
+        word_bank_rendered = word_bank_renderer.render_text(input_text, seed=int(seed))
+        glyph_rendered = glyph_renderer.render_text(input_text, seed=int(seed))
         available_words, missing_words = word_bank.coverage(input_text)
 
-        if rendered.unsupported_labels:
-            st.warning(f"Unsupported labels skipped: {sorted(set(rendered.unsupported_labels))}")
+        if render_mode == "Word-bank assisted":
+            st.image(word_bank_rendered.image, caption="Word-bank-assisted handwriting", use_container_width=True)
+        elif render_mode == "Glyph only":
+            st.image(glyph_rendered.image, caption="Glyph-only handwriting", use_container_width=True)
+        else:
+            comparison = stack_horizontal([word_bank_rendered.image, glyph_rendered.image], gap=28)
+            st.image(
+                comparison,
+                caption="Left: word-bank assisted | Right: glyph only",
+                use_container_width=True,
+            )
+
+        combined_unsupported = sorted(set(word_bank_rendered.unsupported_labels + glyph_rendered.unsupported_labels))
+        if combined_unsupported:
+            st.warning(f"Unsupported labels skipped: {combined_unsupported}")
         else:
             st.success("All characters in the input are currently supported by the dataset.")
 
         st.caption(
             f"Word-bank coverage: {len(available_words)} matched words, {len(missing_words)} fallback words."
         )
-        if rendered.used_word_samples:
-            st.info(f"Used exact handwritten words: {rendered.used_word_samples}")
+        if word_bank_rendered.used_word_samples:
+            st.info(f"Used exact handwritten words: {word_bank_rendered.used_word_samples}")
 
     with right:
         st.subheader("Style Profile")
@@ -116,30 +145,94 @@ def main() -> None:
         )
 
     st.divider()
-    st.subheader("Baseline Evaluation")
+    st.subheader("Word Bank Inspector")
     st.caption(
-        "This is still an accuracy proxy, not OCR accuracy. The renderer redraws known transcripts and compares them against held-out dataset crops while tracking exact-word reuse."
+        "Inspect the extracted handwritten words directly so segmentation issues are visible before they affect synthesis quality."
+    )
+    inventory_df = pd.DataFrame(word_bank.inventory_rows())
+    st.dataframe(inventory_df, use_container_width=True, hide_index=True)
+
+    selected_word = st.selectbox("Inspect extracted word", options=word_bank.available_words())
+    selected_samples = word_bank.samples_for(selected_word)
+    sheet = build_word_contact_sheet(selected_samples)
+    st.image(sheet, caption=f"Extracted samples for '{selected_word}'", use_container_width=True)
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "source_sentence": sample.source_sentence,
+                    "source_file": sample.source_file,
+                    "segmentation_mode": sample.segmentation_mode,
+                    "height": sample.image.shape[0],
+                    "width": sample.image.shape[1],
+                }
+                for sample in selected_samples
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    if st.button("Export Selected Word Sheet"):
+        output_path = export_word_samples(
+            word=selected_word,
+            samples=selected_samples,
+            output_dir=PROJECT_ROOT / "artifacts" / "word_bank_inspector",
+        )
+        st.success(f"Saved word preview sheet to {output_path}")
+
+    st.divider()
+    st.subheader("Renderer Evaluation")
+    st.caption(
+        "This is still an accuracy proxy, not OCR accuracy. The app now compares glyph-only rendering and word-bank-assisted rendering against the same held-out sentence crops."
     )
 
     if st.button("Run Reconstruction Evaluation"):
-        result = evaluate_dataset_reconstruction(
+        word_bank_result = evaluate_dataset_reconstruction(
             dataset=dataset,
-            renderer=renderer,
+            renderer=word_bank_renderer,
             max_samples_per_sentence=2,
             include_copies=False,
         )
-        metric_one, metric_two, metric_three, metric_four = st.columns(4)
-        metric_one.metric("Samples", result.sample_count)
-        metric_two.metric("Mean IoU", f"{result.mean_iou:.4f}")
-        metric_three.metric("Mean MAE", f"{result.mean_mae:.4f}")
-        metric_four.metric(
-            "Mean Word Reuse",
-            f"{(sum(detail.used_word_samples for detail in result.details) / max(1, result.sample_count)):.2f}",
+        glyph_only_result = evaluate_dataset_reconstruction(
+            dataset=dataset,
+            renderer=glyph_renderer,
+            max_samples_per_sentence=2,
+            include_copies=False,
         )
+
+        comparison_df = pd.DataFrame(
+            [
+                {
+                    "renderer": "word_bank_assisted",
+                    "samples": word_bank_result.sample_count,
+                    "mean_iou": round(word_bank_result.mean_iou, 4),
+                    "mean_mae": round(word_bank_result.mean_mae, 4),
+                    "mean_word_reuse": round(
+                        sum(detail.used_word_samples for detail in word_bank_result.details)
+                        / max(1, word_bank_result.sample_count),
+                        2,
+                    ),
+                },
+                {
+                    "renderer": "glyph_only",
+                    "samples": glyph_only_result.sample_count,
+                    "mean_iou": round(glyph_only_result.mean_iou, 4),
+                    "mean_mae": round(glyph_only_result.mean_mae, 4),
+                    "mean_word_reuse": round(
+                        sum(detail.used_word_samples for detail in glyph_only_result.details)
+                        / max(1, glyph_only_result.sample_count),
+                        2,
+                    ),
+                },
+            ]
+        )
+        st.dataframe(comparison_df, use_container_width=True, hide_index=True)
 
         details_df = pd.DataFrame(
             [
                 {
+                    "renderer": "word_bank_assisted",
                     "text": detail.text,
                     "file": detail.path_name,
                     "iou": round(detail.iou, 4),
@@ -147,23 +240,42 @@ def main() -> None:
                     "unsupported_count": detail.unsupported_count,
                     "used_word_samples": detail.used_word_samples,
                 }
-                for detail in result.details
+                for detail in word_bank_result.details
+            ]
+            + [
+                {
+                    "renderer": "glyph_only",
+                    "text": detail.text,
+                    "file": detail.path_name,
+                    "iou": round(detail.iou, 4),
+                    "mae": round(detail.mae, 4),
+                    "unsupported_count": detail.unsupported_count,
+                    "used_word_samples": detail.used_word_samples,
+                }
+                for detail in glyph_only_result.details
             ]
         )
-        st.dataframe(
-            details_df,
-            use_container_width=True,
-            hide_index=True,
-        )
+        st.dataframe(details_df, use_container_width=True, hide_index=True)
 
-        preview_options = [f"{index}: {detail.text} [{detail.path_name}]" for index, detail in enumerate(result.details)]
-        selected = st.selectbox("Preview a reconstruction pair", options=preview_options)
+        preview_options = [
+            f"{index}: {detail.text} [{detail.path_name}]"
+            for index, detail in enumerate(word_bank_result.details)
+        ]
+        selected = st.selectbox("Preview a reconstruction triplet", options=preview_options)
         selected_index = int(selected.split(":", maxsplit=1)[0])
-        chosen_detail = result.details[selected_index]
-        preview_image = side_by_side(chosen_detail.reference_image, chosen_detail.rendered_image)
+        chosen_word_bank_detail = word_bank_result.details[selected_index]
+        chosen_glyph_detail = glyph_only_result.details[selected_index]
+        preview_image = stack_horizontal(
+            [
+                chosen_word_bank_detail.reference_image,
+                chosen_word_bank_detail.rendered_image,
+                chosen_glyph_detail.rendered_image,
+            ],
+            gap=22,
+        )
         st.image(
             preview_image,
-            caption="Left: reference crop | Right: synthesized reconstruction",
+            caption="Left: reference crop | Middle: word-bank assisted | Right: glyph only",
             use_container_width=True,
         )
 

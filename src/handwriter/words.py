@@ -21,6 +21,8 @@ class WordSample:
     source_sentence: str
     source_file: str
     image: np.ndarray
+    segmentation_mode: str
+    segment_index: int
 
 
 @dataclass(frozen=True)
@@ -52,8 +54,34 @@ class WordBank:
             return None
         return rng.choice(choices)
 
+    def samples_for(self, word: str) -> list[WordSample]:
+        """Return all stored samples for a normalized word token."""
 
-def build_word_bank(dataset: HandwritingDataset, include_copies: bool = False) -> WordBank:
+        return list(self.samples_by_word.get(word.lower(), []))
+
+    def inventory_rows(self) -> list[dict[str, object]]:
+        """Build a compact inventory useful for UI tables and reporting."""
+
+        rows: list[dict[str, object]] = []
+        for word, samples in sorted(self.samples_by_word.items()):
+            segmented = sum(1 for sample in samples if sample.segmentation_mode == "segmented")
+            fallback = sum(1 for sample in samples if sample.segmentation_mode != "segmented")
+            rows.append(
+                {
+                    "word": word,
+                    "samples": len(samples),
+                    "segmented_samples": segmented,
+                    "fallback_samples": fallback,
+                }
+            )
+        return rows
+
+
+def build_word_bank(
+    dataset: HandwritingDataset,
+    include_copies: bool = False,
+    include_fallback_samples: bool = False,
+) -> WordBank:
     """Extract a reusable bank of handwritten word crops from sentence images."""
 
     samples_by_word: dict[str, list[WordSample]] = defaultdict(list)
@@ -61,6 +89,8 @@ def build_word_bank(dataset: HandwritingDataset, include_copies: bool = False) -
 
     for sample in dataset.sentences(include_copies=include_copies):
         for word_sample in extract_words_from_sentence(sample):
+            if not include_fallback_samples and word_sample.segmentation_mode != "segmented":
+                continue
             samples_by_word[word_sample.text.lower()].append(word_sample)
             heights.append(word_sample.image.shape[0])
 
@@ -75,35 +105,39 @@ def extract_words_from_sentence(sample: SentenceSample) -> list[WordSample]:
 
     expected_words = sample.text.split()
     if len(expected_words) <= 1:
-        return [_single_word_sample(sample, expected_words[0] if expected_words else sample.text)]
+        return [_single_word_sample(sample, expected_words[0] if expected_words else sample.text, 0)]
 
     image = load_grayscale(sample.path)
     word_images = _segment_word_images(image=image, expected_word_count=len(expected_words))
     if len(word_images) != len(expected_words):
         # A graceful fallback keeps the pipeline deterministic even when the
         # simple gap-based segmentation misses a boundary.
-        return [_single_word_sample(sample, word) for word in expected_words]
+        return [_single_word_sample(sample, word, index) for index, word in enumerate(expected_words)]
 
     extracted: list[WordSample] = []
-    for word, word_image in zip(expected_words, word_images):
+    for index, (word, word_image) in enumerate(zip(expected_words, word_images)):
         extracted.append(
             WordSample(
                 text=word,
                 source_sentence=sample.text,
                 source_file=sample.path.name,
                 image=word_image,
+                segmentation_mode="segmented",
+                segment_index=index,
             )
         )
     return extracted
 
 
-def _single_word_sample(sample: SentenceSample, word: str) -> WordSample:
+def _single_word_sample(sample: SentenceSample, word: str, segment_index: int) -> WordSample:
     image = tight_crop(load_grayscale(sample.path), threshold=220, margin=2)
     return WordSample(
         text=word,
         source_sentence=sample.text,
         source_file=sample.path.name,
         image=image,
+        segmentation_mode="fallback_sentence_crop",
+        segment_index=segment_index,
     )
 
 
