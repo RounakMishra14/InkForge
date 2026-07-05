@@ -50,5 +50,8 @@ class RenderConfig:
     default_word_gap: int = 22
     baseline_jitter: int = 3
     glyph_vertical_jitter: int = 2
+    token_baseline_jitter: int = 2
+    token_height_jitter: int = 2
     output_background: int = 255
     prefer_word_bank: bool = True
+    use_context_spacing: bool = True

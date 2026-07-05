@@ -6,13 +6,13 @@ Right now I am building the project in measured stages instead of jumping direct
 
 ## Current Focus
 
-The project has now moved into the third implementation batch. The active focus is:
+The project has now moved into the fourth implementation batch. The active focus is:
 
-- comparing word-bank-assisted rendering against glyph-only rendering directly
-- inspecting extracted word samples before trusting them in synthesis
-- keeping unreliable fallback word crops out of the active word bank
-- exporting word-preview sheets so segmentation issues are easier to review outside the app
-- tightening the feedback loop between segmentation quality and rendering quality
+- learning context-aware spacing from segmented handwritten words
+- comparing context-aware spacing against flatter spacing baselines inside the app
+- keeping exact word reuse for known tokens while improving fallback composition for unseen words
+- exposing the learned spacing profile so pair-level behavior is inspectable
+- tightening the connection between spacing analysis and synthesis quality
 
 ## Dataset Summary
 
@@ -36,10 +36,12 @@ The repository currently includes:
   - sentence-level style analysis and profile aggregation
 - `src/handwriter/words.py`
   - transcript-aware word segmentation and a reliable-only word-bank construction path
+- `src/handwriter/spacing.py`
+  - context-aware spacing estimation from segmented words and glyph width reconciliation
 - `src/handwriter/quality.py`
   - duplicate and copy detection helpers for dataset hygiene
 - `src/handwriter/renderer.py`
-  - a renderer that can combine exact handwritten word reuse with glyph fallback
+  - a renderer that can combine exact handwritten word reuse with context-aware glyph fallback
 - `src/handwriter/evaluation.py`
   - reconstruction metrics plus preview-ready evaluation payloads
 - `src/handwriter/word_inspector.py`
@@ -47,7 +49,7 @@ The repository currently includes:
 - `app.py`
   - a Streamlit interface to inspect style stats, dataset quality, render text, inspect extracted words, and compare renderer outputs
 
-This is still a measured baseline rather than the final architecture. The main difference now is that the system can reuse full handwritten words from the sentence set when they are available, which should move the output closer to the writer's real line rhythm before introducing more complex modeling.
+This is still a measured baseline rather than the final architecture. The main difference now is that the system no longer treats all glyph gaps the same. The renderer can reuse full handwritten words when available and apply a learned spacing profile when it needs to compose unseen words from isolated glyphs.
 
 ## Why This Direction
 
@@ -87,8 +89,9 @@ The current evaluation reports:
 - word-bank reuse counts
 - reference versus reconstruction previews in the app
 - renderer-to-renderer comparison against the same held-out samples
+- spacing-profile summaries and high-impact pair overrides
 
-These metrics are still only a proxy, but they are already useful for checking whether the renderer is improving in the right direction, whether word-level reuse is actually helping, and whether the extracted word bank is reliable enough to trust.
+These metrics are still only a proxy, but they are already useful for checking whether the renderer is improving in the right direction, whether word-level reuse is actually helping, whether the extracted word bank is reliable enough to trust, and whether context-aware spacing is improving fallback composition.
 
 ## Current Capabilities
 
@@ -97,7 +100,9 @@ At this stage the renderer can:
 - synthesize arbitrary text using isolated character, digit, and symbol glyphs
 - reuse exact handwritten word samples when the input overlaps with the sentence dataset
 - fall back to glyph composition for unseen words
+- apply pair-aware spacing estimates when glyph composition is needed
 - compare word-bank-assisted output against glyph-only output in the same interface
+- compare context-aware spacing against flatter spacing baselines
 - inspect per-word extracted samples before reusing them
 - expose basic dataset quality indicators so duplicate-heavy subsets are easier to spot
 - export word preview sheets to `artifacts/` for manual inspection
@@ -108,11 +113,11 @@ At this stage the renderer can:
 The next iterations I plan to build here are:
 
 1. improve the word segmentation heuristics so the reliable word bank grows beyond the current filtered subset
-2. add character-neighbor-aware spacing instead of a single average gap model
+2. expand the spacing model with stronger punctuation-aware and uppercase-aware transitions
 3. support multi-line paragraph rendering and export-friendly layouts
 4. build better duplicate filtering so repeated samples do not over-influence style statistics
 5. add side-by-side error analysis for the worst-performing evaluation samples
 
 ## Project Status
 
-This repository is actively under construction. The current code now includes a measurable baseline, a filtered word-retrieval layer, and inspection tools to verify whether extracted word samples are trustworthy before they influence the final handwriting output.
+This repository is actively under construction. The current code now includes a measurable baseline, a filtered word-retrieval layer, inspection tools for extracted words, and a context-aware spacing model that begins to capture more of the writer's real line rhythm during fallback synthesis.

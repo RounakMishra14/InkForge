@@ -11,6 +11,7 @@ from PIL import Image
 from .config import RenderConfig
 from .dataset import GlyphSample, HandwritingDataset
 from .image_ops import load_grayscale, resize_to_height, tight_crop
+from .spacing import SpacingProfile
 from .style import StyleProfile
 from .words import WordBank, prepare_word_image
 
@@ -32,11 +33,13 @@ class HandwritingRenderer:
         self,
         dataset: HandwritingDataset,
         style_profile: StyleProfile,
+        spacing_profile: SpacingProfile | None = None,
         word_bank: WordBank | None = None,
         config: RenderConfig | None = None,
     ) -> None:
         self.dataset = dataset
         self.style_profile = style_profile
+        self.spacing_profile = spacing_profile
         self.word_bank = word_bank
         self.config = config or RenderConfig()
 
@@ -54,7 +57,7 @@ class HandwritingRenderer:
         unsupported: list[str] = []
         used_word_samples: list[str] = []
         cursor_x = self.config.padding_x
-        baseline_y = int(
+        line_baseline_y = int(
             self.config.padding_y
             + self.style_profile.average_sentence_height
             + rng.randint(-self.config.baseline_jitter, self.config.baseline_jitter)
@@ -63,11 +66,15 @@ class HandwritingRenderer:
         tokens = text.split(" ")
         for token_index, token in enumerate(tokens):
             if token:
+                token_baseline_y = line_baseline_y + rng.randint(
+                    -self._token_baseline_jitter(),
+                    self._token_baseline_jitter(),
+                )
                 token_cursor, token_placed, token_unsupported, token_word_sample = self._render_token(
                     canvas=canvas,
                     token=token,
                     cursor_x=cursor_x,
-                    baseline_y=baseline_y,
+                    baseline_y=token_baseline_y,
                     rng=rng,
                 )
                 cursor_x = token_cursor
@@ -101,22 +108,25 @@ class HandwritingRenderer:
             if word_sample is not None:
                 word_image = prepare_word_image(
                     word_sample,
-                    target_height=max(24, min(72, self.style_profile.average_sentence_height + 10)),
+                    target_height=self._base_glyph_height(),
                 )
-                next_cursor = self._paste_glyph(canvas, word_image, cursor_x, baseline_y, rng)
+                next_cursor = self._paste_glyph(canvas, word_image, cursor_x, baseline_y, rng, gap_after=0)
                 return next_cursor, list(token), [], word_sample.text
 
         placed_labels: list[str] = []
         unsupported: list[str] = []
-        for char in token:
+        for index, char in enumerate(token):
             glyph = self._choose_glyph(char, rng)
             if glyph is None:
                 unsupported.append(char)
                 cursor_x += max(self.config.default_word_gap, int(round(self.style_profile.average_word_gap / 2)))
                 continue
 
-            glyph_image = self._prepare_glyph(glyph)
-            cursor_x = self._paste_glyph(canvas, glyph_image, cursor_x, baseline_y, rng)
+            glyph_image = self._prepare_glyph(glyph, target_height=self._target_glyph_height(rng))
+            gap_after = 0
+            if index < len(token) - 1:
+                gap_after = self._gap_after(char, token[index + 1], rng)
+            cursor_x = self._paste_glyph(canvas, glyph_image, cursor_x, baseline_y, rng, gap_after=gap_after)
             placed_labels.append(char)
 
         return cursor_x, placed_labels, unsupported, None
@@ -129,13 +139,12 @@ class HandwritingRenderer:
             return None
         return rng.choice(choices)
 
-    def _prepare_glyph(self, glyph: GlyphSample) -> np.ndarray:
+    def _prepare_glyph(self, glyph: GlyphSample, target_height: int) -> np.ndarray:
         image = load_grayscale(glyph.path)
         cropped = tight_crop(image, threshold=220, margin=1)
 
         # Scale the isolated glyphs into the vertical footprint implied by the
         # sentence-level examples so the composition feels closer to the writer.
-        target_height = max(24, min(72, self.style_profile.average_sentence_height + 10))
         return resize_to_height(cropped, target_height=target_height)
 
     def _paste_glyph(
@@ -145,11 +154,8 @@ class HandwritingRenderer:
         cursor_x: int,
         baseline_y: int,
         rng: random.Random,
+        gap_after: int,
     ) -> int:
-        char_gap = max(
-            self.config.min_char_gap,
-            int(round(self.style_profile.average_char_gap)) + rng.randint(0, self.config.max_char_gap_jitter),
-        )
         vertical_jitter = rng.randint(-self.config.glyph_vertical_jitter, self.config.glyph_vertical_jitter)
 
         top = max(0, baseline_y - glyph.shape[0] + vertical_jitter)
@@ -163,7 +169,36 @@ class HandwritingRenderer:
 
         # Using np.minimum keeps darker ink while preserving the white paper.
         canvas[top:bottom, left:right] = np.minimum(canvas[top:bottom, left:right], writable_glyph)
-        return right + char_gap
+        return right + gap_after
+
+    def _gap_after(self, left: str, right: str, rng: random.Random) -> int:
+        if self.config.use_context_spacing and self.spacing_profile is not None:
+            base_gap = self.spacing_profile.gap_for(left, right)
+            jitter_max = max(1, self.config.max_char_gap_jitter - 1)
+            return max(self.config.min_char_gap, int(round(base_gap + rng.randint(0, jitter_max))))
+
+        return max(
+            self.config.min_char_gap,
+            int(round(self.style_profile.average_char_gap)) + rng.randint(0, self.config.max_char_gap_jitter),
+        )
+
+    def _target_glyph_height(self, rng: random.Random) -> int:
+        base_height = self._base_glyph_height()
+        height_jitter = self._token_height_jitter()
+        return max(24, min(72, base_height + rng.randint(-height_jitter, height_jitter)))
+
+    def _base_glyph_height(self) -> int:
+        return max(24, min(72, self.style_profile.average_sentence_height + 10))
+
+    def _token_baseline_jitter(self) -> int:
+        if self.spacing_profile is not None:
+            return self.spacing_profile.token_baseline_jitter
+        return self.config.token_baseline_jitter
+
+    def _token_height_jitter(self) -> int:
+        if self.spacing_profile is not None:
+            return self.spacing_profile.token_height_jitter
+        return self.config.token_height_jitter
 
     @staticmethod
     def _trim_canvas(canvas: np.ndarray, margin: int = 8) -> np.ndarray:
