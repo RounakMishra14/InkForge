@@ -93,6 +93,19 @@ class HandwritingRenderer:
             used_word_samples=used_word_samples,
         )
 
+    def estimate_text_width(self, text: str, seed: int = 7) -> int:
+        """Estimate rendered width using the same sampling path as the line renderer."""
+
+        rng = random.Random(seed)
+        cursor_x = self.config.padding_x
+        tokens = text.split(" ")
+        for token_index, token in enumerate(tokens):
+            if token:
+                cursor_x = self._estimate_token_width(token=token, cursor_x=cursor_x, rng=rng)
+            if token_index < len(tokens) - 1:
+                cursor_x += max(self.config.default_word_gap, int(round(self.style_profile.average_word_gap)))
+        return max(0, cursor_x - self.config.padding_x)
+
     def _render_token(
         self,
         canvas: np.ndarray,
@@ -108,7 +121,7 @@ class HandwritingRenderer:
             if word_sample is not None:
                 word_image = prepare_word_image(
                     word_sample,
-                    target_height=self._base_glyph_height(),
+                    target_height=self._target_word_height(word_sample),
                 )
                 next_cursor = self._paste_glyph(canvas, word_image, cursor_x, baseline_y, rng, gap_after=0)
                 return next_cursor, list(token), [], word_sample.text
@@ -131,6 +144,36 @@ class HandwritingRenderer:
 
         return cursor_x, placed_labels, unsupported, None
 
+    def _estimate_token_width(
+        self,
+        token: str,
+        cursor_x: int,
+        rng: random.Random,
+    ) -> int:
+        """Estimate token width without creating a line canvas."""
+
+        if self.config.prefer_word_bank and self.word_bank is not None:
+            word_sample = self.word_bank.sample_for(token, rng)
+            if word_sample is not None:
+                word_image = prepare_word_image(
+                    word_sample,
+                    target_height=self._target_word_height(word_sample),
+                )
+                return cursor_x + word_image.shape[1]
+
+        for index, char in enumerate(token):
+            glyph = self._choose_glyph(char, rng)
+            if glyph is None:
+                cursor_x += max(self.config.default_word_gap, int(round(self.style_profile.average_word_gap / 2)))
+                continue
+
+            glyph_image = self._prepare_glyph(glyph, target_height=self._target_glyph_height(rng))
+            cursor_x += glyph_image.shape[1]
+            if index < len(token) - 1:
+                cursor_x += self._gap_after(char, token[index + 1], rng)
+
+        return cursor_x
+
     def _choose_glyph(self, char: str, rng: random.Random) -> GlyphSample | None:
         choices = self.dataset.glyphs_for(char)
         if not choices and char == "*":
@@ -145,7 +188,8 @@ class HandwritingRenderer:
 
         # Scale the isolated glyphs into the vertical footprint implied by the
         # sentence-level examples so the composition feels closer to the writer.
-        return resize_to_height(cropped, target_height=target_height)
+        adjusted_height = self._glyph_target_height(glyph.label, target_height)
+        return resize_to_height(cropped, target_height=adjusted_height)
 
     def _paste_glyph(
         self,
@@ -189,6 +233,31 @@ class HandwritingRenderer:
 
     def _base_glyph_height(self) -> int:
         return max(24, min(72, self.style_profile.average_sentence_height + 10))
+
+    def _target_word_height(self, word_sample) -> int:
+        """Slightly normalize exact word-bank samples against the bank average."""
+
+        base_height = self._base_glyph_height()
+        if self.word_bank is None:
+            return base_height
+
+        sample_height = max(1, word_sample.image.shape[0])
+        average_height = max(1, self.word_bank.average_word_height)
+        correction = (average_height / sample_height) ** 0.25
+        correction = min(1.18, max(0.92, correction))
+        return max(24, min(72, round(base_height * correction)))
+
+    @staticmethod
+    def _glyph_target_height(label: str, target_height: int) -> int:
+        """Keep punctuation visually smaller than full letter glyphs."""
+
+        if label == ".":
+            return max(8, round(target_height * 0.3))
+        if label == ",":
+            return max(10, round(target_height * 0.38))
+        if label in {"!", "?"}:
+            return max(18, round(target_height * 0.78))
+        return target_height
 
     def _token_baseline_jitter(self) -> int:
         if self.spacing_profile is not None:

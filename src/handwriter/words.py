@@ -81,18 +81,28 @@ def build_word_bank(
     dataset: HandwritingDataset,
     include_copies: bool = False,
     include_fallback_samples: bool = False,
+    min_samples_per_word: int = 3,
 ) -> WordBank:
     """Extract a reusable bank of handwritten word crops from sentence images."""
 
-    samples_by_word: dict[str, list[WordSample]] = defaultdict(list)
-    heights: list[int] = []
+    raw_samples_by_word: dict[str, list[WordSample]] = defaultdict(list)
 
     for sample in dataset.sentences(include_copies=include_copies):
         for word_sample in extract_words_from_sentence(sample):
             if not include_fallback_samples and word_sample.segmentation_mode != "segmented":
                 continue
-            samples_by_word[word_sample.text.lower()].append(word_sample)
-            heights.append(word_sample.image.shape[0])
+            if not _is_valid_word_sample(word_sample):
+                continue
+            raw_samples_by_word[word_sample.text.lower()].append(word_sample)
+
+    samples_by_word: dict[str, list[WordSample]] = {}
+    heights: list[int] = []
+    for word, samples in raw_samples_by_word.items():
+        filtered_samples = _filter_word_sample_outliers(samples)
+        if len(filtered_samples) < min_samples_per_word:
+            continue
+        samples_by_word[word] = filtered_samples
+        heights.extend(sample.image.shape[0] for sample in filtered_samples)
 
     return WordBank(
         samples_by_word=dict(samples_by_word),
@@ -176,6 +186,43 @@ def prepare_word_image(word_sample: WordSample, target_height: int) -> np.ndarra
 
     cropped = tight_crop(word_sample.image, threshold=220, margin=1)
     return resize_to_height(cropped, target_height=target_height)
+
+
+def _is_valid_word_sample(word_sample: WordSample) -> bool:
+    """Filter obviously broken word segments out of the reusable word bank."""
+
+    cropped = tight_crop(word_sample.image, threshold=220, margin=1)
+    height, width = cropped.shape
+    min_width = max(12, len(word_sample.text) * 4)
+    if height < 14 or width < min_width:
+        return False
+    if height <= 2 or width <= 2:
+        return False
+    return True
+
+
+def _filter_word_sample_outliers(samples: list[WordSample]) -> list[WordSample]:
+    """Drop obviously stretched or squashed samples within the same word bucket."""
+
+    if len(samples) <= 2:
+        return list(samples)
+
+    ratios = []
+    for sample in samples:
+        cropped = tight_crop(sample.image, threshold=220, margin=1)
+        height, width = cropped.shape
+        ratios.append(width / max(1, height))
+
+    median_ratio = sorted(ratios)[len(ratios) // 2]
+    filtered: list[WordSample] = []
+    for sample, ratio in zip(samples, ratios):
+        if ratio > median_ratio * 1.7:
+            continue
+        if ratio < median_ratio * 0.55:
+            continue
+        filtered.append(sample)
+
+    return filtered if filtered else list(samples)
 
 
 def _find_zero_runs(is_zero_column: np.ndarray) -> list[tuple[int, int]]:

@@ -17,11 +17,14 @@ from handwriter import (  # noqa: E402
     DatasetPaths,
     HandwritingDataset,
     HandwritingRenderer,
+    ParagraphLayoutConfig,
+    ParagraphRenderer,
     RenderConfig,
     build_spacing_profile,
     build_style_profile,
     build_word_bank,
     evaluate_dataset_reconstruction,
+    image_to_png_bytes,
 )
 from handwriter.preview import stack_horizontal  # noqa: E402
 from handwriter.quality import build_quality_report  # noqa: E402
@@ -85,19 +88,34 @@ def main() -> None:
     with left:
         input_text = st.text_area(
             "Typed input",
-            value="The quick brown fox jumps over the lazy dog",
-            height=120,
+            value="The quick brown fox jumps over the lazy dog. Keep calm and carry on while data science unlocks hidden insights.",
+            height=180,
         )
         seed = st.number_input("Render seed", min_value=0, max_value=9999, value=7, step=1)
+        max_line_width = st.slider("Max line width", min_value=500, max_value=1300, value=1000, step=20)
+        line_spacing = st.slider("Line spacing", min_value=8, max_value=48, value=22, step=2)
+        page_padding = st.slider("Page padding", min_value=12, max_value=80, value=40, step=4)
+        line_margin_drift = st.slider("Line margin drift", min_value=0, max_value=24, value=8, step=1)
         render_mode = st.radio(
             "Render mode",
             options=("Context-aware", "Flat word-bank", "Glyph only", "Compare all"),
             horizontal=True,
         )
 
-        context_rendered = context_renderer.render_text(input_text, seed=int(seed))
-        flat_word_bank_rendered = flat_word_bank_renderer.render_text(input_text, seed=int(seed))
-        glyph_rendered = glyph_renderer.render_text(input_text, seed=int(seed))
+        layout_config = ParagraphLayoutConfig(
+            max_line_width=int(max_line_width),
+            page_padding_x=int(page_padding),
+            page_padding_y=int(page_padding),
+            line_spacing=int(line_spacing),
+            line_margin_drift=int(line_margin_drift),
+        )
+        context_paragraph_renderer = ParagraphRenderer(context_renderer, layout_config=layout_config)
+        flat_paragraph_renderer = ParagraphRenderer(flat_word_bank_renderer, layout_config=layout_config)
+        glyph_paragraph_renderer = ParagraphRenderer(glyph_renderer, layout_config=layout_config)
+
+        context_rendered = context_paragraph_renderer.render_paragraph(input_text, seed=int(seed))
+        flat_word_bank_rendered = flat_paragraph_renderer.render_paragraph(input_text, seed=int(seed))
+        glyph_rendered = glyph_paragraph_renderer.render_paragraph(input_text, seed=int(seed))
         available_words, missing_words = word_bank.coverage(input_text)
 
         if render_mode == "Context-aware":
@@ -134,6 +152,14 @@ def main() -> None:
         )
         if context_rendered.used_word_samples:
             st.info(f"Used exact handwritten words: {context_rendered.used_word_samples}")
+        st.caption(f"Wrapped into {len(context_rendered.lines)} line(s).")
+
+        st.download_button(
+            "Download Context-Aware PNG",
+            data=image_to_png_bytes(context_rendered.image),
+            file_name="handwritten_output.png",
+            mime="image/png",
+        )
 
     with right:
         st.subheader("Style Profile")
@@ -182,6 +208,15 @@ def main() -> None:
             }
         )
         st.dataframe(pd.DataFrame(spacing_profile.top_pairs()), use_container_width=True, hide_index=True)
+
+        st.subheader("Wrapped Lines")
+        st.dataframe(
+            pd.DataFrame(
+                [{"line_number": index + 1, "text": line} for index, line in enumerate(context_rendered.lines)]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
 
     st.divider()
     st.subheader("Word Bank Inspector")
