@@ -3,7 +3,8 @@
 from .config import DatasetPaths, RenderConfig
 from .dataset import HandwritingDataset
 from .evaluation import EvaluationResult, evaluate_dataset_reconstruction
-from .paragraph import ParagraphLayoutConfig, ParagraphRenderer, RenderedParagraph, image_to_png_bytes
+from .page_design import PageStyleConfig, image_to_png_bytes, images_to_pdf_bytes
+from .paragraph import ParagraphLayoutConfig, ParagraphRenderer, RenderedDocument, RenderedPage
 from .renderer import HandwritingRenderer, RenderedLine
 from .spacing import SpacingProfile, build_spacing_profile
 from .style import StyleProfile, build_style_profile
@@ -16,9 +17,11 @@ __all__ = [
     "HandwritingRenderer",
     "ParagraphLayoutConfig",
     "ParagraphRenderer",
+    "PageStyleConfig",
     "RenderConfig",
     "RenderedLine",
-    "RenderedParagraph",
+    "RenderedDocument",
+    "RenderedPage",
     "SpacingProfile",
     "StyleProfile",
     "build_spacing_profile",
@@ -28,4 +31,5 @@ __all__ = [
     "build_word_bank",
     "evaluate_dataset_reconstruction",
     "image_to_png_bytes",
+    "images_to_pdf_bytes",
 ]
