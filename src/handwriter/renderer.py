@@ -12,6 +12,7 @@ from .config import RenderConfig
 from .dataset import GlyphSample, HandwritingDataset
 from .image_ops import load_grayscale, resize_to_height, tight_crop
 from .style import StyleProfile
+from .words import WordBank, prepare_word_image
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,7 @@ class RenderedLine:
     image: Image.Image
     placed_labels: list[str]
     unsupported_labels: list[str]
+    used_word_samples: list[str]
 
 
 class HandwritingRenderer:
@@ -30,10 +32,12 @@ class HandwritingRenderer:
         self,
         dataset: HandwritingDataset,
         style_profile: StyleProfile,
+        word_bank: WordBank | None = None,
         config: RenderConfig | None = None,
     ) -> None:
         self.dataset = dataset
         self.style_profile = style_profile
+        self.word_bank = word_bank
         self.config = config or RenderConfig()
 
     def render_text(self, text: str, seed: int = 7) -> RenderedLine:
@@ -48,6 +52,7 @@ class HandwritingRenderer:
 
         placed_labels: list[str] = []
         unsupported: list[str] = []
+        used_word_samples: list[str] = []
         cursor_x = self.config.padding_x
         baseline_y = int(
             self.config.padding_y
@@ -55,11 +60,55 @@ class HandwritingRenderer:
             + rng.randint(-self.config.baseline_jitter, self.config.baseline_jitter)
         )
 
-        for char in text:
-            if char == " ":
+        tokens = text.split(" ")
+        for token_index, token in enumerate(tokens):
+            if token:
+                token_cursor, token_placed, token_unsupported, token_word_sample = self._render_token(
+                    canvas=canvas,
+                    token=token,
+                    cursor_x=cursor_x,
+                    baseline_y=baseline_y,
+                    rng=rng,
+                )
+                cursor_x = token_cursor
+                placed_labels.extend(token_placed)
+                unsupported.extend(token_unsupported)
+                if token_word_sample:
+                    used_word_samples.append(token_word_sample)
+            if token_index < len(tokens) - 1:
                 cursor_x += max(self.config.default_word_gap, int(round(self.style_profile.average_word_gap)))
-                continue
 
+        final = self._trim_canvas(canvas)
+        return RenderedLine(
+            image=Image.fromarray(final),
+            placed_labels=placed_labels,
+            unsupported_labels=unsupported,
+            used_word_samples=used_word_samples,
+        )
+
+    def _render_token(
+        self,
+        canvas: np.ndarray,
+        token: str,
+        cursor_x: int,
+        baseline_y: int,
+        rng: random.Random,
+    ) -> tuple[int, list[str], list[str], str | None]:
+        """Render one token either from the word bank or from glyph composition."""
+
+        if self.config.prefer_word_bank and self.word_bank is not None:
+            word_sample = self.word_bank.sample_for(token, rng)
+            if word_sample is not None:
+                word_image = prepare_word_image(
+                    word_sample,
+                    target_height=max(24, min(72, self.style_profile.average_sentence_height + 10)),
+                )
+                next_cursor = self._paste_glyph(canvas, word_image, cursor_x, baseline_y, rng)
+                return next_cursor, list(token), [], word_sample.text
+
+        placed_labels: list[str] = []
+        unsupported: list[str] = []
+        for char in token:
             glyph = self._choose_glyph(char, rng)
             if glyph is None:
                 unsupported.append(char)
@@ -70,8 +119,7 @@ class HandwritingRenderer:
             cursor_x = self._paste_glyph(canvas, glyph_image, cursor_x, baseline_y, rng)
             placed_labels.append(char)
 
-        final = self._trim_canvas(canvas)
-        return RenderedLine(image=Image.fromarray(final), placed_labels=placed_labels, unsupported_labels=unsupported)
+        return cursor_x, placed_labels, unsupported, None
 
     def _choose_glyph(self, char: str, rng: random.Random) -> GlyphSample | None:
         choices = self.dataset.glyphs_for(char)

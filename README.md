@@ -6,13 +6,13 @@ Right now I am building the project in measured stages instead of jumping direct
 
 ## Current Focus
 
-The first implementation batch in this repo is centered on:
+The project has now moved into the second implementation batch. The active focus is:
 
-- organizing the dataset behind reusable loader utilities
-- extracting a baseline style profile from the sentence crops
-- rendering typed text through glyph composition as a measurable baseline
-- adding reconstruction-style evaluation so each improvement can be checked against held-out sentence samples
-- keeping the codebase modular enough to support later additions like word-level retrieval, better spacing models, and stronger style transfer
+- keeping the glyph-based baseline intact as a controlled fallback
+- extracting reusable handwritten word crops from the sentence dataset
+- using exact word retrieval when the typed input overlaps with known words
+- reporting duplicate pressure and dataset quality issues more explicitly
+- improving evaluation so reconstruction results can be inspected visually, not only numerically
 
 ## Dataset Summary
 
@@ -34,20 +34,25 @@ The repository currently includes:
   - dataset indexing and label normalization
 - `src/handwriter/style.py`
   - sentence-level style analysis and profile aggregation
+- `src/handwriter/words.py`
+  - transcript-aware word segmentation and word-bank construction
+- `src/handwriter/quality.py`
+  - duplicate and copy detection helpers for dataset hygiene
 - `src/handwriter/renderer.py`
-  - a first-pass glyph composition renderer
+  - a renderer that can combine exact handwritten word reuse with glyph fallback
 - `src/handwriter/evaluation.py`
-  - reconstruction metrics for baseline quality checks
+  - reconstruction metrics plus preview-ready evaluation payloads
 - `app.py`
-  - a Streamlit interface to inspect style stats, render text, and run evaluation
+  - a Streamlit interface to inspect style stats, dataset quality, render text, and preview evaluation pairs
 
-This is intentionally a baseline, not the final architecture. The renderer is simple enough to debug and measure, which makes it a better starting point for this dataset than an opaque model that overfits early.
+This is still a measured baseline rather than the final architecture. The main difference now is that the system can reuse full handwritten words from the sentence set when they are available, which should move the output closer to the writer's real line rhythm before introducing more complex modeling.
 
 ## Why This Direction
 
 The current dataset is useful, but it is not large enough for me to assume that a heavy generative model will generalize well to arbitrary text. Because of that, the project starts with a retrieval-and-composition style system:
 
 - reuse the real writer's glyphs
+- reuse full handwritten words when the dataset already contains them
 - learn spacing and layout behavior from the sentence crops
 - measure how close the generated result is to known samples
 - improve incrementally from a stable baseline
@@ -72,24 +77,36 @@ streamlit run app.py
 
 For now, "accuracy" in this repo means **how well the current renderer can reconstruct the overall look of known sentence samples** when given the same text transcript.
 
-The baseline evaluation currently reports:
+The current evaluation reports:
 
 - IoU on binarized handwriting masks
 - normalized mean absolute pixel error
 - unsupported character counts
+- word-bank reuse counts
+- side-by-side reference versus reconstruction previews in the app
 
-These metrics are only a first proxy, but they are useful for tracking whether spacing, scaling, and placement changes are moving the synthesis in the right direction.
+These metrics are still only a proxy, but they are already useful for checking whether the renderer is improving in the right direction and whether word-level reuse is actually helping rather than just sounding good in theory.
+
+## Current Capabilities
+
+At this stage the renderer can:
+
+- synthesize arbitrary text using isolated character, digit, and symbol glyphs
+- reuse exact handwritten word samples when the input overlaps with the sentence dataset
+- fall back to glyph composition for unseen words
+- expose basic dataset quality indicators so duplicate-heavy subsets are easier to spot
+- show visual reconstruction comparisons directly in the Streamlit app
 
 ## Near-Term Roadmap
 
 The next iterations I plan to build here are:
 
-1. better duplicate handling and dataset quality checks
-2. word-level extraction from sentence images for more natural synthesis
-3. stronger spacing models conditioned on character neighbors
-4. multi-line layout and export improvements in the Streamlit app
-5. more reliable evaluation and visual side-by-side comparisons
+1. improve the word segmentation heuristics and reduce fallback cases
+2. add character-neighbor-aware spacing instead of a single average gap model
+3. support multi-line paragraph rendering and export-friendly layouts
+4. build better duplicate filtering so repeated samples do not over-influence style statistics
+5. compare word-reuse rendering against pure glyph rendering in the same evaluation view
 
 ## Project Status
 
-This repository is actively under construction. The current code establishes the first measurable synthesis baseline and sets up the modular pieces needed for later refinement.
+This repository is actively under construction. The current code now includes both the first measurable synthesis baseline and a second-stage word retrieval layer, which gives the project a stronger foundation for producing this specific writer's style more faithfully.

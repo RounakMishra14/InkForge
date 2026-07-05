@@ -1,0 +1,158 @@
+"""Word-level extraction from sentence crops."""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from dataclasses import dataclass
+from statistics import mean
+import random
+
+import numpy as np
+
+from .dataset import HandwritingDataset, SentenceSample
+from .image_ops import load_grayscale, resize_to_height, tight_crop, to_ink_mask
+
+
+@dataclass(frozen=True)
+class WordSample:
+    """A segmented handwritten word extracted from a sentence crop."""
+
+    text: str
+    source_sentence: str
+    source_file: str
+    image: np.ndarray
+
+
+@dataclass(frozen=True)
+class WordBank:
+    """Lookup table for exact handwritten words seen in the sentence dataset."""
+
+    samples_by_word: dict[str, list[WordSample]]
+    average_word_height: int
+
+    def available_words(self) -> list[str]:
+        return sorted(self.samples_by_word.keys())
+
+    def coverage(self, text: str) -> tuple[list[str], list[str]]:
+        """Split requested tokens into retrievable words and fallback words."""
+
+        available: list[str] = []
+        missing: list[str] = []
+        for token in text.split():
+            normalized = token.lower()
+            if normalized in self.samples_by_word:
+                available.append(token)
+            else:
+                missing.append(token)
+        return available, missing
+
+    def sample_for(self, word: str, rng: random.Random) -> WordSample | None:
+        choices = self.samples_by_word.get(word.lower())
+        if not choices:
+            return None
+        return rng.choice(choices)
+
+
+def build_word_bank(dataset: HandwritingDataset, include_copies: bool = False) -> WordBank:
+    """Extract a reusable bank of handwritten word crops from sentence images."""
+
+    samples_by_word: dict[str, list[WordSample]] = defaultdict(list)
+    heights: list[int] = []
+
+    for sample in dataset.sentences(include_copies=include_copies):
+        for word_sample in extract_words_from_sentence(sample):
+            samples_by_word[word_sample.text.lower()].append(word_sample)
+            heights.append(word_sample.image.shape[0])
+
+    return WordBank(
+        samples_by_word=dict(samples_by_word),
+        average_word_height=int(round(mean(heights))) if heights else 32,
+    )
+
+
+def extract_words_from_sentence(sample: SentenceSample) -> list[WordSample]:
+    """Segment a sentence crop into word crops using transcript-aware gap selection."""
+
+    expected_words = sample.text.split()
+    if len(expected_words) <= 1:
+        return [_single_word_sample(sample, expected_words[0] if expected_words else sample.text)]
+
+    image = load_grayscale(sample.path)
+    word_images = _segment_word_images(image=image, expected_word_count=len(expected_words))
+    if len(word_images) != len(expected_words):
+        # A graceful fallback keeps the pipeline deterministic even when the
+        # simple gap-based segmentation misses a boundary.
+        return [_single_word_sample(sample, word) for word in expected_words]
+
+    extracted: list[WordSample] = []
+    for word, word_image in zip(expected_words, word_images):
+        extracted.append(
+            WordSample(
+                text=word,
+                source_sentence=sample.text,
+                source_file=sample.path.name,
+                image=word_image,
+            )
+        )
+    return extracted
+
+
+def _single_word_sample(sample: SentenceSample, word: str) -> WordSample:
+    image = tight_crop(load_grayscale(sample.path), threshold=220, margin=2)
+    return WordSample(
+        text=word,
+        source_sentence=sample.text,
+        source_file=sample.path.name,
+        image=image,
+    )
+
+
+def _segment_word_images(image: np.ndarray, expected_word_count: int) -> list[np.ndarray]:
+    mask = to_ink_mask(image)
+    col_sums = mask.sum(axis=0)
+    gaps = _find_zero_runs(col_sums == 0)
+    if expected_word_count <= 1:
+        return [tight_crop(image, threshold=220, margin=2)]
+
+    needed_boundaries = expected_word_count - 1
+    if len(gaps) < needed_boundaries:
+        return [tight_crop(image, threshold=220, margin=2)]
+
+    chosen_gaps = sorted(gaps, key=lambda gap: gap[1] - gap[0], reverse=True)[:needed_boundaries]
+    chosen_gaps = sorted(chosen_gaps, key=lambda gap: gap[0])
+
+    boundaries: list[tuple[int, int]] = []
+    start = 0
+    for gap_start, gap_end in chosen_gaps:
+        boundaries.append((start, gap_start))
+        start = gap_end
+    boundaries.append((start, image.shape[1]))
+
+    words: list[np.ndarray] = []
+    for start_col, end_col in boundaries:
+        slice_image = image[:, start_col:end_col]
+        cropped = tight_crop(slice_image, threshold=220, margin=2)
+        if cropped.size > 0:
+            words.append(cropped)
+    return words
+
+
+def prepare_word_image(word_sample: WordSample, target_height: int) -> np.ndarray:
+    """Resize a word crop into the shared sentence-height footprint."""
+
+    cropped = tight_crop(word_sample.image, threshold=220, margin=1)
+    return resize_to_height(cropped, target_height=target_height)
+
+
+def _find_zero_runs(is_zero_column: np.ndarray) -> list[tuple[int, int]]:
+    runs: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, value in enumerate(is_zero_column.tolist()):
+        if value and start is None:
+            start = index
+        elif not value and start is not None:
+            runs.append((start, index))
+            start = None
+    if start is not None:
+        runs.append((start, len(is_zero_column)))
+    return runs

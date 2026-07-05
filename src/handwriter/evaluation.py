@@ -8,7 +8,7 @@ from statistics import mean
 import numpy as np
 from PIL import Image
 
-from .dataset import HandwritingDataset, SentenceSample
+from .dataset import HandwritingDataset
 from .image_ops import binary_iou, load_grayscale, normalized_mae, pad_to_same_size
 from .renderer import HandwritingRenderer
 
@@ -22,6 +22,9 @@ class SentenceEvaluation:
     iou: float
     mae: float
     unsupported_count: int
+    used_word_samples: int
+    rendered_image: Image.Image
+    reference_image: Image.Image
 
 
 @dataclass(frozen=True)
@@ -58,6 +61,9 @@ def evaluate_dataset_reconstruction(
                     iou=binary_iou(candidate, reference),
                     mae=normalized_mae(candidate, reference),
                     unsupported_count=len(rendered.unsupported_labels),
+                    used_word_samples=len(rendered.used_word_samples),
+                    rendered_image=Image.fromarray(candidate),
+                    reference_image=Image.fromarray(reference),
                 )
             )
 

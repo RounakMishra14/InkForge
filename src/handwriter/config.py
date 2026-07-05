@@ -51,3 +51,4 @@ class RenderConfig:
     baseline_jitter: int = 3
     glyph_vertical_jitter: int = 2
     output_background: int = 255
+    prefer_word_bank: bool = True
