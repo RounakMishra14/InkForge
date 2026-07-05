@@ -37,8 +37,8 @@ class MainViewState:
 def render_header() -> None:
     """Display the public-facing app title and summary."""
 
-    st.title("Handwriter Notebook")
-    st.caption("Turn typed notes into organized notebook pages using your personalized handwriting dataset.")
+    st.title("InkForge")
+    st.caption("Turn typed notes into organized notebook pages using your personalized handwriting style.")
 
 
 def render_main_controls() -> MainViewState:

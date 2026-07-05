@@ -30,7 +30,7 @@ def bootstrap_pipeline():
 
 
 def main() -> None:
-    st.set_page_config(page_title="Handwriter Prototype", layout="wide")
+    st.set_page_config(page_title="InkForge", layout="wide")
 
     pipeline = bootstrap_pipeline()
     show_debug_tools = render_debug_toggle()
