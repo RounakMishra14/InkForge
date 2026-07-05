@@ -13,6 +13,7 @@ from .dataset import GlyphSample, HandwritingDataset
 from .image_ops import load_grayscale, resize_to_height, tight_crop
 from .spacing import SpacingProfile
 from .style import StyleProfile
+from .synthetic_symbols import should_prefer_synthetic_symbol, synthetic_symbol_image
 from .words import WordBank, prepare_word_image, split_edge_punctuation
 
 
@@ -233,13 +234,19 @@ class HandwritingRenderer:
             cursor_x += self._gap_after(previous_char, text[0], rng)
 
         for index, char in enumerate(text):
-            glyph = self._choose_glyph(char, rng)
-            if glyph is None:
+            previous_for_char = previous_char if index == 0 else text[index - 1]
+            next_for_char = next_char if index == len(text) - 1 else text[index + 1]
+            glyph_image = self._prepare_char_image(
+                char=char,
+                rng=rng,
+                previous_char=previous_for_char,
+                next_char=next_for_char,
+            )
+            if glyph_image is None:
                 unsupported.append(char)
                 cursor_x += max(self.config.default_word_gap, int(round(self.style_profile.average_word_gap / 2)))
                 continue
 
-            glyph_image = self._prepare_glyph(glyph, target_height=self._target_glyph_height(rng))
             gap_after = 0
             if index < len(text) - 1:
                 gap_after = self._gap_after(char, text[index + 1], rng)
@@ -264,12 +271,18 @@ class HandwritingRenderer:
             cursor_x += self._gap_after(previous_char, text[0], rng)
 
         for index, char in enumerate(text):
-            glyph = self._choose_glyph(char, rng)
-            if glyph is None:
+            previous_for_char = previous_char if index == 0 else text[index - 1]
+            next_for_char = next_char if index == len(text) - 1 else text[index + 1]
+            glyph_image = self._prepare_char_image(
+                char=char,
+                rng=rng,
+                previous_char=previous_for_char,
+                next_char=next_for_char,
+            )
+            if glyph_image is None:
                 cursor_x += max(self.config.default_word_gap, int(round(self.style_profile.average_word_gap / 2)))
                 continue
 
-            glyph_image = self._prepare_glyph(glyph, target_height=self._target_glyph_height(rng))
             cursor_x += glyph_image.shape[1]
             if index < len(text) - 1:
                 cursor_x += self._gap_after(char, text[index + 1], rng)
@@ -286,6 +299,42 @@ class HandwritingRenderer:
         # sentence-level examples so the composition feels closer to the writer.
         adjusted_height = self._glyph_target_height(glyph.label, target_height)
         return resize_to_height(cropped, target_height=adjusted_height)
+
+    def _prepare_char_image(
+        self,
+        char: str,
+        rng: random.Random,
+        previous_char: str | None = None,
+        next_char: str | None = None,
+    ) -> np.ndarray | None:
+        target_height = self._target_glyph_height(rng)
+        synthetic = self._synthetic_char_image(
+            char=char,
+            target_height=target_height,
+            previous_char=previous_char,
+            next_char=next_char,
+        )
+        if synthetic is not None:
+            return synthetic
+
+        glyph = self._choose_glyph(char, rng)
+        if glyph is None:
+            return None
+        return self._prepare_glyph(glyph, target_height=target_height)
+
+    def _synthetic_char_image(
+        self,
+        char: str,
+        target_height: int,
+        previous_char: str | None = None,
+        next_char: str | None = None,
+    ) -> np.ndarray | None:
+        if should_prefer_synthetic_symbol(char, previous_char=previous_char, next_char=next_char):
+            return synthetic_symbol_image(char, target_height=target_height)
+
+        if self.dataset.glyphs_for(char):
+            return None
+        return synthetic_symbol_image(char, target_height=target_height)
 
     def _paste_glyph(
         self,

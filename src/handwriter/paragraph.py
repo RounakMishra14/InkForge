@@ -247,6 +247,7 @@ class ParagraphRenderer:
                 expanded.append(LineLayout(text="", kind="blank"))
                 continue
 
+            stripped = self._normalize_note_prefix(stripped)
             if first_content_line:
                 expanded.append(
                     LineLayout(
@@ -260,6 +261,20 @@ class ParagraphRenderer:
 
             expanded.append(LineLayout(text=stripped, kind="body"))
         return expanded
+
+    @staticmethod
+    def _normalize_note_prefix(text: str) -> str:
+        if text.startswith("- "):
+            return f"* {text[2:].strip()}"
+        if text.startswith("* "):
+            return f"* {text[2:].strip()}"
+        if text.startswith("> "):
+            return f"> {text[2:].strip()}"
+        if text.startswith("[ ] "):
+            return f"[ ] {text[4:].strip()}"
+        if text.lower().startswith("[x] "):
+            return f"[x] {text[4:].strip()}"
+        return text
 
     @staticmethod
     def _scale_line_image(image: Image.Image, scale: float) -> Image.Image:
