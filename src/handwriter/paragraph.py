@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import random
+import math
 
 import numpy as np
 from PIL import Image
@@ -28,8 +29,11 @@ class ParagraphLayoutConfig:
     page_padding_left: int = 112
     line_spacing: int = 20
     line_margin_drift: int = 8
+    body_scale: float = 1.0
     title_scale: float = 1.2
     title_spacing: int = 26
+    treat_first_line_as_title: bool = False
+    highlight_prefix: str = "!! "
 
 
 @dataclass(frozen=True)
@@ -132,8 +136,7 @@ class ParagraphRenderer:
         for index, line in enumerate(line_layouts):
             rendered_line = self._render_line_layout(line, seed=seed + (index * 137))
             line_image = rendered_line.image.convert("L")
-            if line.kind == "title":
-                line_image = self._scale_line_image(line_image, self.layout_config.title_scale)
+            line_image = self._scale_line_image(line_image, self._line_scale(line.kind))
             line_results.append((line, rendered_line, line_image))
             unsupported_labels.extend(rendered_line.unsupported_labels)
             used_word_samples.extend(rendered_line.used_word_samples)
@@ -145,7 +148,7 @@ class ParagraphRenderer:
         page_number = 1
 
         for line, _, line_image in line_results:
-            consumed_height = line_image.height + self._line_spacing_after(line.kind)
+            consumed_height = self._line_consumed_height(line_image.height, line.kind)
             if current_items and cursor_y + consumed_height > page_limit:
                 pages.append(
                     self._compose_page(
@@ -191,28 +194,29 @@ class ParagraphRenderer:
         for line, image in items:
             drift = rng.randint(-self.layout_config.line_margin_drift, self.layout_config.line_margin_drift)
             cursor_x = max(0, self.layout_config.page_padding_left + drift)
+            line_top = self._line_top(cursor_y, image.height)
 
             if line.highlight:
                 draw_highlight_band(
                     background,
-                    top=max(0, cursor_y + 4),
+                    top=max(0, line_top + 4),
                     left=max(0, cursor_x - 8),
                     width=min(image.width + 16, background.shape[1] - cursor_x),
-                    height=min(image.height, 44),
-                    color=self.page_style.title_highlight_color,
-                    opacity=0.42,
+                    height=max(28, image.height),
+                    color=self.page_style.marker_color,
+                    opacity=self.page_style.marker_opacity,
                 )
 
             compose_handwriting_layer(
                 background=background,
                 handwriting=image,
-                top=cursor_y,
+                top=line_top,
                 left=cursor_x,
                 ink_color=self.page_style.ink_color,
                 boldness=self.page_style.boldness,
             )
             lines.append(line.text)
-            cursor_y += image.height + self._line_spacing_after(line.kind)
+            cursor_y += self._line_consumed_height(image.height, line.kind)
 
         return RenderedPage(
             image=Image.fromarray(background),
@@ -224,18 +228,38 @@ class ParagraphRenderer:
         if not line.text:
             blank = np.full((1, 1), 255, dtype=np.uint8)
             return RenderedLine(Image.fromarray(blank), [], [], [])
-        return self.line_renderer.render_text(line.text, seed=seed)
+
+        scale = self._line_scale(line.kind)
+        if scale >= 0.99:
+            return self.line_renderer.render_text(line.text, seed=seed)
+
+        expanded_renderer = self._scaled_line_renderer(scale)
+        return expanded_renderer.render_text(line.text, seed=seed)
 
     def _estimate_line_width(self, text: str, kind: str, seed: int) -> int:
         estimated = self.line_renderer.estimate_text_width(text, seed=seed)
-        if kind == "title":
-            return int(round(estimated * self.layout_config.title_scale))
-        return estimated
+        return int(round(estimated * self._line_scale(kind)))
 
     def _line_spacing_after(self, kind: str) -> int:
         if kind == "title":
             return self.layout_config.title_spacing
         return self.layout_config.line_spacing
+
+    def _line_consumed_height(self, image_height: int, kind: str) -> int:
+        base_height = image_height + self._line_spacing_after(kind)
+        if self.page_style.paper_style in {"Ruled", "Grid"}:
+            return max(self.page_style.rule_spacing, base_height)
+        return base_height
+
+    def _line_top(self, cursor_y: int, image_height: int) -> int:
+        if self.page_style.paper_style not in {"Ruled", "Grid"}:
+            return cursor_y
+
+        rule_spacing = max(24, self.page_style.rule_spacing)
+        band_index = max(0, math.ceil(cursor_y / rule_spacing))
+        band_top = band_index * rule_spacing
+        centered_top = band_top + max(0, (rule_spacing - image_height) // 2)
+        return max(0, centered_top)
 
     def _expand_note_lines(self, text: str) -> list[LineLayout]:
         blocks = text.splitlines() or [text]
@@ -247,19 +271,36 @@ class ParagraphRenderer:
                 expanded.append(LineLayout(text="", kind="blank"))
                 continue
 
-            stripped = self._normalize_note_prefix(stripped)
-            if first_content_line:
+            highlight = False
+            if stripped.startswith(self.layout_config.highlight_prefix):
+                stripped = stripped[len(self.layout_config.highlight_prefix) :].strip()
+                highlight = True
+
+            if stripped.startswith("## "):
                 expanded.append(
                     LineLayout(
-                        text=stripped,
+                        text=self._normalize_note_prefix(stripped[3:].strip()),
                         kind="title",
-                        highlight=self.page_style.title_highlight,
+                        highlight=highlight or self.page_style.title_highlight,
                     )
                 )
                 first_content_line = False
                 continue
 
-            expanded.append(LineLayout(text=stripped, kind="body"))
+            stripped = self._normalize_note_prefix(stripped)
+            if first_content_line and self.layout_config.treat_first_line_as_title:
+                expanded.append(
+                    LineLayout(
+                        text=stripped,
+                        kind="title",
+                        highlight=highlight or self.page_style.title_highlight,
+                    )
+                )
+                first_content_line = False
+                continue
+
+            expanded.append(LineLayout(text=stripped, kind="body", highlight=highlight))
+            first_content_line = False
         return expanded
 
     @staticmethod
@@ -276,9 +317,32 @@ class ParagraphRenderer:
             return f"[x] {text[4:].strip()}"
         return text
 
+    def _line_scale(self, kind: str) -> float:
+        if kind == "title":
+            return self.layout_config.body_scale * self.layout_config.title_scale
+        return self.layout_config.body_scale
+
+    def _scaled_line_renderer(self, scale: float) -> HandwritingRenderer:
+        expansion = max(1.0, 1.0 / max(scale, 0.1))
+        config = self.line_renderer.config
+        expanded_config = replace(
+            config,
+            canvas_width=max(config.canvas_width, int(round(config.canvas_width * expansion))),
+            canvas_height=max(config.canvas_height, int(round(config.canvas_height * expansion))),
+            padding_x=max(config.padding_x, int(round(config.padding_x * expansion))),
+            padding_y=max(config.padding_y, int(round(config.padding_y * expansion))),
+        )
+        return HandwritingRenderer(
+            dataset=self.line_renderer.dataset,
+            style_profile=self.line_renderer.style_profile,
+            spacing_profile=self.line_renderer.spacing_profile,
+            word_bank=self.line_renderer.word_bank,
+            config=expanded_config,
+        )
+
     @staticmethod
     def _scale_line_image(image: Image.Image, scale: float) -> Image.Image:
-        if scale <= 1.0:
+        if abs(scale - 1.0) < 0.01:
             return image
         width = max(1, round(image.width * scale))
         height = max(1, round(image.height * scale))

@@ -36,13 +36,13 @@ def should_prefer_synthetic_symbol(
 ) -> bool:
     """Return whether a symbol should bypass the dataset glyph path."""
 
+    if char == "-":
+        return True
     if char in {"=", ":", ";", "_", "/", "\\", "|", "<", ">"}:
         return True
     if char == "*" and previous_char is None:
         return True
     if char == "+" and _is_standalone_operator(previous_char, next_char):
-        return True
-    if char == "-" and (previous_char is None or _is_standalone_operator(previous_char, next_char)):
         return True
     return False
 

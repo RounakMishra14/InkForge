@@ -26,6 +26,8 @@ class PageStyleConfig:
     boldness: int = 1
     title_highlight: bool = False
     title_highlight_color: tuple[int, int, int] = (255, 246, 153)
+    marker_color: tuple[int, int, int] = (255, 246, 153)
+    marker_opacity: float = 0.42
 
 
 def build_page_background(style: PageStyleConfig) -> np.ndarray:
@@ -94,12 +96,19 @@ def draw_highlight_band(
     color: tuple[int, int, int],
     opacity: float = 0.4,
 ) -> None:
-    """Apply a soft highlight band behind a handwritten line."""
+    """Apply a marker-style highlight band behind a handwritten line."""
 
     right = min(background.shape[1], left + width)
     bottom = min(background.shape[0], top + height)
     if right <= left or bottom <= top:
         return
+
+    pad_y = max(2, round(height * 0.08))
+    pad_x = max(4, round(width * 0.015))
+    top = max(0, top - pad_y)
+    bottom = min(background.shape[0], bottom + pad_y)
+    left = max(0, left - pad_x)
+    right = min(background.shape[1], right + pad_x)
 
     area = background[top:bottom, left:right, :].astype(np.float32)
     highlight = np.array(color, dtype=np.float32).reshape(1, 1, 3)
