@@ -13,7 +13,7 @@ from .dataset import GlyphSample, HandwritingDataset
 from .image_ops import load_grayscale, resize_to_height, tight_crop
 from .spacing import SpacingProfile
 from .style import StyleProfile
-from .words import WordBank, prepare_word_image
+from .words import WordBank, prepare_word_image, split_edge_punctuation
 
 
 @dataclass(frozen=True)
@@ -126,21 +126,44 @@ class HandwritingRenderer:
                 next_cursor = self._paste_glyph(canvas, word_image, cursor_x, baseline_y, rng, gap_after=0)
                 return next_cursor, list(token), [], word_sample.text
 
+            leading, core, trailing = split_edge_punctuation(token)
+            core_sample = self.word_bank.sample_for(core, rng) if core and core != token else None
+            if core_sample is not None:
+                cursor_x, placed_labels, unsupported = self._render_char_sequence(
+                    canvas=canvas,
+                    text=leading,
+                    cursor_x=cursor_x,
+                    baseline_y=baseline_y,
+                    rng=rng,
+                    next_char=core[0],
+                )
+                word_image = prepare_word_image(
+                    core_sample,
+                    target_height=self._target_word_height(core_sample),
+                )
+                cursor_x = self._paste_glyph(canvas, word_image, cursor_x, baseline_y, rng, gap_after=0)
+                cursor_x, trailing_labels, trailing_unsupported = self._render_char_sequence(
+                    canvas=canvas,
+                    text=trailing,
+                    cursor_x=cursor_x,
+                    baseline_y=baseline_y,
+                    rng=rng,
+                    previous_char=core[-1],
+                )
+                placed_labels.extend(list(core))
+                placed_labels.extend(trailing_labels)
+                unsupported.extend(trailing_unsupported)
+                return cursor_x, placed_labels, unsupported, core_sample.text
+
         placed_labels: list[str] = []
         unsupported: list[str] = []
-        for index, char in enumerate(token):
-            glyph = self._choose_glyph(char, rng)
-            if glyph is None:
-                unsupported.append(char)
-                cursor_x += max(self.config.default_word_gap, int(round(self.style_profile.average_word_gap / 2)))
-                continue
-
-            glyph_image = self._prepare_glyph(glyph, target_height=self._target_glyph_height(rng))
-            gap_after = 0
-            if index < len(token) - 1:
-                gap_after = self._gap_after(char, token[index + 1], rng)
-            cursor_x = self._paste_glyph(canvas, glyph_image, cursor_x, baseline_y, rng, gap_after=gap_after)
-            placed_labels.append(char)
+        cursor_x, placed_labels, unsupported = self._render_char_sequence(
+            canvas=canvas,
+            text=token,
+            cursor_x=cursor_x,
+            baseline_y=baseline_y,
+            rng=rng,
+        )
 
         return cursor_x, placed_labels, unsupported, None
 
@@ -161,18 +184,28 @@ class HandwritingRenderer:
                 )
                 return cursor_x + word_image.shape[1]
 
-        for index, char in enumerate(token):
-            glyph = self._choose_glyph(char, rng)
-            if glyph is None:
-                cursor_x += max(self.config.default_word_gap, int(round(self.style_profile.average_word_gap / 2)))
-                continue
+            leading, core, trailing = split_edge_punctuation(token)
+            core_sample = self.word_bank.sample_for(core, rng) if core and core != token else None
+            if core_sample is not None:
+                cursor_x = self._estimate_char_sequence_width(
+                    text=leading,
+                    cursor_x=cursor_x,
+                    rng=rng,
+                    next_char=core[0],
+                )
+                word_image = prepare_word_image(
+                    core_sample,
+                    target_height=self._target_word_height(core_sample),
+                )
+                cursor_x += word_image.shape[1]
+                return self._estimate_char_sequence_width(
+                    text=trailing,
+                    cursor_x=cursor_x,
+                    rng=rng,
+                    previous_char=core[-1],
+                )
 
-            glyph_image = self._prepare_glyph(glyph, target_height=self._target_glyph_height(rng))
-            cursor_x += glyph_image.shape[1]
-            if index < len(token) - 1:
-                cursor_x += self._gap_after(char, token[index + 1], rng)
-
-        return cursor_x
+        return self._estimate_char_sequence_width(text=token, cursor_x=cursor_x, rng=rng)
 
     def _choose_glyph(self, char: str, rng: random.Random) -> GlyphSample | None:
         choices = self.dataset.glyphs_for(char)
@@ -181,6 +214,69 @@ class HandwritingRenderer:
         if not choices:
             return None
         return rng.choice(choices)
+
+    def _render_char_sequence(
+        self,
+        canvas: np.ndarray,
+        text: str,
+        cursor_x: int,
+        baseline_y: int,
+        rng: random.Random,
+        next_char: str | None = None,
+        previous_char: str | None = None,
+    ) -> tuple[int, list[str], list[str]]:
+        """Render a short glyph sequence, optionally bridging spacing from adjacent parts."""
+
+        placed_labels: list[str] = []
+        unsupported: list[str] = []
+        if previous_char is not None and text:
+            cursor_x += self._gap_after(previous_char, text[0], rng)
+
+        for index, char in enumerate(text):
+            glyph = self._choose_glyph(char, rng)
+            if glyph is None:
+                unsupported.append(char)
+                cursor_x += max(self.config.default_word_gap, int(round(self.style_profile.average_word_gap / 2)))
+                continue
+
+            glyph_image = self._prepare_glyph(glyph, target_height=self._target_glyph_height(rng))
+            gap_after = 0
+            if index < len(text) - 1:
+                gap_after = self._gap_after(char, text[index + 1], rng)
+            elif next_char is not None:
+                gap_after = self._gap_after(char, next_char, rng)
+            cursor_x = self._paste_glyph(canvas, glyph_image, cursor_x, baseline_y, rng, gap_after=gap_after)
+            placed_labels.append(char)
+
+        return cursor_x, placed_labels, unsupported
+
+    def _estimate_char_sequence_width(
+        self,
+        text: str,
+        cursor_x: int,
+        rng: random.Random,
+        next_char: str | None = None,
+        previous_char: str | None = None,
+    ) -> int:
+        """Mirror glyph sequence rendering when only width estimation is needed."""
+
+        if previous_char is not None and text:
+            cursor_x += self._gap_after(previous_char, text[0], rng)
+
+        for index, char in enumerate(text):
+            glyph = self._choose_glyph(char, rng)
+            if glyph is None:
+                cursor_x += max(self.config.default_word_gap, int(round(self.style_profile.average_word_gap / 2)))
+                continue
+
+            glyph_image = self._prepare_glyph(glyph, target_height=self._target_glyph_height(rng))
+            cursor_x += glyph_image.shape[1]
+            if index < len(text) - 1:
+                cursor_x += self._gap_after(char, text[index + 1], rng)
+            elif next_char is not None:
+                cursor_x += self._gap_after(char, next_char, rng)
+
+        return cursor_x
 
     def _prepare_glyph(self, glyph: GlyphSample, target_height: int) -> np.ndarray:
         image = load_grayscale(glyph.path)

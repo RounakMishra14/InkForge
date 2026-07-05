@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+import hashlib
 from statistics import mean
 import random
 
@@ -11,6 +12,8 @@ import numpy as np
 
 from .dataset import HandwritingDataset, SentenceSample
 from .image_ops import load_grayscale, resize_to_height, tight_crop, to_ink_mask
+
+EDGE_PUNCTUATION = ".,!?"
 
 
 @dataclass(frozen=True)
@@ -41,8 +44,7 @@ class WordBank:
         available: list[str] = []
         missing: list[str] = []
         for token in text.split():
-            normalized = token.lower()
-            if normalized in self.samples_by_word:
+            if self.can_reuse_token(token):
                 available.append(token)
             else:
                 missing.append(token)
@@ -53,6 +55,16 @@ class WordBank:
         if not choices:
             return None
         return rng.choice(choices)
+
+    def can_reuse_token(self, token: str) -> bool:
+        """Return whether a token can reuse an exact or punctuation-trimmed word sample."""
+
+        normalized = token.lower()
+        if normalized in self.samples_by_word:
+            return True
+
+        _, core, _ = split_edge_punctuation(token)
+        return bool(core) and core.lower() in self.samples_by_word
 
     def samples_for(self, word: str) -> list[WordSample]:
         """Return all stored samples for a normalized word token."""
@@ -99,6 +111,7 @@ def build_word_bank(
     heights: list[int] = []
     for word, samples in raw_samples_by_word.items():
         filtered_samples = _filter_word_sample_outliers(samples)
+        filtered_samples = _deduplicate_word_samples(filtered_samples)
         if len(filtered_samples) < min_samples_per_word:
             continue
         samples_by_word[word] = filtered_samples
@@ -188,6 +201,18 @@ def prepare_word_image(word_sample: WordSample, target_height: int) -> np.ndarra
     return resize_to_height(cropped, target_height=target_height)
 
 
+def split_edge_punctuation(token: str) -> tuple[str, str, str]:
+    """Separate sentence-edge punctuation from the reusable core word body."""
+
+    start = 0
+    end = len(token)
+    while start < end and token[start] in EDGE_PUNCTUATION:
+        start += 1
+    while end > start and token[end - 1] in EDGE_PUNCTUATION:
+        end -= 1
+    return token[:start], token[start:end], token[end:]
+
+
 def _is_valid_word_sample(word_sample: WordSample) -> bool:
     """Filter obviously broken word segments out of the reusable word bank."""
 
@@ -223,6 +248,21 @@ def _filter_word_sample_outliers(samples: list[WordSample]) -> list[WordSample]:
         filtered.append(sample)
 
     return filtered if filtered else list(samples)
+
+
+def _deduplicate_word_samples(samples: list[WordSample]) -> list[WordSample]:
+    """Keep one representative for exact duplicate crops within the same word bucket."""
+
+    deduplicated: list[WordSample] = []
+    seen_digests: set[str] = set()
+    for sample in samples:
+        cropped = tight_crop(sample.image, threshold=220, margin=1)
+        digest = hashlib.sha1(cropped.tobytes()).hexdigest()
+        if digest in seen_digests:
+            continue
+        seen_digests.add(digest)
+        deduplicated.append(sample)
+    return deduplicated
 
 
 def _find_zero_runs(is_zero_column: np.ndarray) -> list[tuple[int, int]]:
